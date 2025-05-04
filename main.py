@@ -32,10 +32,10 @@ async def how_to_use(message: types.Message):
         "• Пример:\n"
         "`/create_dispute 'Погода 25 мая' 'Будет дождь в Москве' '2024-05-24 20:00' '2024-05-25 20:00'`\n\n"
         "Для ставки:\n"
-        "`/bet Название_спора [T/F] Сумма`\n"
+        "`/bet 'Название спора' [T/F] Сумма`\n"
         "• Пример: `/bet 'Погода 25 мая' T 1000`\n\n"
         "Для голосования:\n"
-        "`/vote Название_спора [T/F]`\n"
+        "`/vote 'Название спора' [T/F]`\n"
         "• Пример: `/vote 'Погода 25 мая' F`",
         parse_mode="MarkdownV2"
     )
@@ -56,7 +56,7 @@ async def list_disputes(message: types.Message):
     
     for dispute in current_disputes:
         response.append(
-            f"▫️ *{dispute['name']}*\n"
+            f"▫️ `{dispute['name']}`\n"
             f"├ Описание: {dispute['description']}\n"
             f"├ Ставки до: {dispute['end_bet_time'].strftime('%Y-%m-%d %H:%M')}\n"
             f"└ Завершение: {dispute['end_dispute_time'].strftime('%Y-%m-%d %H:%M')}\n"
@@ -105,8 +105,11 @@ async def resolve_dispute(chat_id: int, name: str):
         dispute['bets'][i].result = (t_votes/(t_votes + f_votes) if b["on"]=='T' else f_votes/(t_votes + f_votes)) *\
         (b["sum"] + (b["sum"]/(t_bets_sum if b["on"]=='T' else f_bets_sum)) *\
         (f_bets_sum if b["on"]=='T' else t_bets_sum))
+
         # TODO добавить вывод ника вместо id
-        msg += f"👤 {b["uid"]} получает {dispute['bets'][i]["result"]} \n"
+        chat_member = await bot.get_chat_member(dispute['chat_id'], b['uid'])
+        username = f"@{chat_member.user.username}"
+        msg += f"👤 {username} получает {dispute['bets'][i]["result"]} \n"
         # TODO добавить переводы тон коинов для реальных ставок
 
     await bot.send_message(chat_id, msg)
@@ -226,7 +229,9 @@ async def bet(message: types.Message):
     msg = "Ставка принята.\nТекущие ставки:\n"
     for b in dispute['bets']:
         # TODO добавить вывод ника вместо id
-        msg += f"👤 {b["uid"]} ставит {b["sum"]} на {"успех" if b["on"] == 'T' else "неудачу"}\n"
+        chat_member = await bot.get_chat_member(dispute['chat_id'], b['uid'])
+        username = f"@{chat_member.user.username}"
+        msg += f"👤 {username} ставит {b["sum"]} на {"успех" if b["on"] == 'T' else "неудачу"}\n"
 
     await message.reply(msg)
 
