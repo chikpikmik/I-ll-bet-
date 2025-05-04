@@ -1,216 +1,280 @@
-import asyncio
+import os
 import logging
 from datetime import datetime
-from aiogram import Bot, Dispatcher, types, F
+from typing import Dict, Tuple, Any
+from aiogram import Bot, Dispatcher, types
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+import asyncio 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import shlex
 
-# Настройка логгирования
 logging.basicConfig(level=logging.INFO)
 
-# Инициализация бота и диспетчера
-bot = Bot(token="YOUR_BOT_TOKEN")
-dp = Dispatcher()
+from dotenv import load_dotenv
+load_dotenv()
+bot = Bot(token=os.getenv('BOT_TOKEN'))
 
-# Хранение данных (в реальном проекте используйте БД)
-active_disputes = {}
-bets = {}
-judges_votes = {}
-dispute_votes = {}
+storage = MemoryStorage()
+dp = Dispatcher(bot=bot, storage=storage)
+scheduler = AsyncIOScheduler()
 
-class Form(StatesGroup):
-    name = State()
-    options = State()
-    end_date = State()
-    judges = State()
+disputes: Dict[Tuple[int, str], Dict[str, Any]] = {}
 
-# Стартовая команда
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer(
-        "Привет! Я бот для организации споров. Чтобы создать спор используй /create_dispute"
+
+
+@dp.message(Command('how_to_use'))
+async def how_to_use(message: types.Message):
+    await message.reply(
+        "Для создания спора используй:\n"
+        "`/create_dispute  'Название спора' 'Описание, критерии' 'Дата и время окончания приема ставок' 'Дата и время окончания спора'`\n\n"
+        f"• Формат даты: `'{datetime.now().strftime('%Y-%m-%d %H:%M')}'`\n"
+        "• Пример:\n"
+        "`/create_dispute 'Погода 25 мая' 'Будет дождь в Москве' '2024-05-24 20:00' '2024-05-25 20:00'`\n\n"
+        "Для ставки:\n"
+        "`/bet Название_спора [T/F] Сумма`\n"
+        "• Пример: `/bet 'Погода 25 мая' T 1000`\n\n"
+        "Для голосования:\n"
+        "`/vote Название_спора [T/F]`\n"
+        "• Пример: `/vote 'Погода 25 мая' F`",
+        parse_mode="MarkdownV2"
     )
 
-# Создание спора
-@dp.message(Command("create_dispute"))
-async def cmd_create_dispute(message: types.Message, state: FSMContext):
-    await state.set_state(Form.name)
-    await message.answer("Введите название спора:")
+@dp.message(Command("list_disputes"))
+async def list_disputes(message: types.Message):
+    chat_id = message.chat.id
+    current_disputes = [
+        dispute for (cid, name), dispute in disputes.items() 
+        if cid == chat_id
+    ]
 
-@dp.message(Form.name)
-async def process_name(message: types.Message, state: FSMContext):
-    if message.text in active_disputes:
-        await message.answer("Спор с таким названием уже существует!")
+    if not current_disputes:
+        await message.reply("🚫 В этом чате нет активных споров")
         return
-        
-    await state.update_data(name=message.text)
-    await state.set_state(Form.options)
-    await message.answer("Введите варианты через запятую (минимум 2):")
 
-@dp.message(Form.options)
-async def process_options(message: types.Message, state: FSMContext):
-    options = [x.strip() for x in message.text.split(",")]
-    if len(options) < 2:
-        await message.answer("Нужно минимум 2 варианта!")
-        return
-        
-    await state.update_data(options=options)
-    await state.set_state(Form.end_date)
-    await message.answer("Введите дату окончания (ДД.ММ.ГГГГ):")
-
-@dp.message(Form.end_date)
-async def process_end_date(message: types.Message, state: FSMContext):
-    try:
-        end_date = datetime.strptime(message.text, "%d.%m.%Y")
-    except ValueError:
-        await message.answer("Неверный формат даты!")
-        return
-        
-    await state.update_data(end_date=end_date)
-    await state.set_state(Form.judges)
-    await message.answer("Введите юзернеймы судей через запятую (@user1, @user2):")
-
-@dp.message(Form.judges)
-async def process_judges(message: types.Message, state: FSMContext):
-    judges = [x.strip().lower() for x in message.text.split(",")]
-    data = await state.get_data()
+    response = ["📋 Список активных споров:\n"]
     
-    active_disputes[data['name']] = {
-        'options': data['options'],
-        'end_date': data['end_date'],
-        'judges': judges,
-        'creator': message.from_user.username,
-        'bank': 0,
-        'participants': []
-    }
-    
-    bets[data['name']] = {}
-    await state.clear()
-    await message.answer(f"Спор '{data['name']}' создан!")
-
-# Ставка
-@dp.message(Command("bet"))
-async def cmd_bet(message: types.Message):
-    args = message.text.split()[1:]
-    if len(args) != 3:
-        await message.answer("Использование: /bet [спор] [вариант] [сумма]")
-        return
-        
-    dispute_name, option, amount = args
-    user = message.from_user.username
-    
-    if dispute_name not in active_disputes:
-        await message.answer("Спор не найден!")
-        return
-        
-    dispute = active_disputes[dispute_name]
-    
-    if option not in dispute['options']:
-        await message.answer("Неверный вариант!")
-        return
-        
-    try:
-        amount = int(amount)
-    except ValueError:
-        await message.answer("Неверная сумма!")
-        return
-        
-    if user not in bets[dispute_name]:
-        bets[dispute_name][user] = {'option': option, 'amount': amount}
-        dispute['bank'] += amount
-        dispute['participants'].append(user)
-        await message.answer(f"Ставка принята! Текущий банк: {dispute['bank']}")
-    else:
-        await message.answer("Вы уже сделали ставку в этом споре!")
-
-# Разрешение спора
-@dp.message(Command("resolve_dispute"))
-async def cmd_resolve(message: types.Message):
-    dispute_name = message.text.split()[1]
-    
-    if dispute_name not in active_disputes:
-        await message.answer("Спор не найден!")
-        return
-        
-    dispute = active_disputes[dispute_name]
-    
-    if datetime.now() < dispute['end_date']:
-        await message.answer("Дата окончания спора еще не наступила!")
-        return
-        
-    judges = dispute['judges']
-    builder = InlineKeyboardBuilder()
-    
-    for option in dispute['options']:
-        builder.button(text=option, callback_data=f"vote_{dispute_name}_{option}")
-    
-    for judge in judges:
-        await bot.send_message(
-            chat_id=message.chat.id,
-            text=f"{judge}, проголосуйте за результат спора:",
-            reply_markup=builder.as_markup()
+    for dispute in current_disputes:
+        response.append(
+            f"▫️ *{dispute['name']}*\n"
+            f"├ Описание: {dispute['description']}\n"
+            f"├ Ставки до: {dispute['end_bet_time'].strftime('%Y-%m-%d %H:%M')}\n"
+            f"└ Завершение: {dispute['end_dispute_time'].strftime('%Y-%m-%d %H:%M')}\n"
         )
-    
-    dispute_votes[dispute_name] = {'votes': {}, 'total_judges': len(judges)}
 
-# Обработка голосов
-@dp.callback_query(F.data.startswith("vote_"))
-async def process_vote(callback: types.CallbackQuery):
-    _, dispute_name, option = callback.data.split("_", 2)
-    judge = callback.from_user.username.lower()
-    
-    if judge not in active_disputes[dispute_name]['judges']:
-        await callback.answer("Вы не судья в этом споре!")
-        return
-        
-    if judge in dispute_votes[dispute_name]['votes']:
-        await callback.answer("Вы уже проголосовали!")
-        return
-        
-    dispute_votes[dispute_name]['votes'][judge] = option
-    await callback.answer(f"Ваш голос за {option} учтен!")
-    
-    # Проверка завершения голосования
-    if len(dispute_votes[dispute_name]['votes']) == dispute_votes[dispute_name]['total_judges']:
-        await finish_voting(dispute_name, callback.message.chat.id)
+    # Разбиваем сообщение на части, если слишком длинное
+    full_message = "\n".join(response)
+    for part in [full_message[i:i+4096] for i in range(0, len(full_message), 4096)]:
+        await message.answer(part, parse_mode="Markdown")
 
-async def finish_voting(dispute_name: str, chat_id: int):
-    votes = dispute_votes[dispute_name]['votes']
-    result = max(set(votes.values()), key=list(votes.values()).count)
-    
-    dispute = active_disputes[dispute_name]
-    total_bank = dispute['bank']
-    participants = bets[dispute_name]
-    
-    winning_bets = [user for user, bet in participants.items() if bet['option'] == result]
-    total_winning = sum(bet['amount'] for bet in participants.values() if bet['option'] == result)
-    
-    if total_winning == 0:
-        await bot.send_message(chat_id, "Нет выигравших ставок!")
+
+
+
+
+async def resolve_dispute(chat_id: int, name: str):
+    key = (chat_id, name)
+    if key not in disputes:
         return
-        
-    # Распределение банка
-    payouts = {}
-    for user in winning_bets:
-        share = participants[user]['amount'] / total_winning
-        payouts[user] = round(total_bank * share, 2)
+
+    dispute = disputes[key]
+    """
+    if datetime.now() < dispute['end_dispute_time']:
+        return
+    """
+
+    if not dispute['votes']:
+        await bot.send_message(chat_id, f"Спор '{name}' не разрешён: нет голосов.")
+        # TODO что то делать в этой ситуации
+        return
+
+    t_votes = sum(1 for v in dispute['votes'].values() if v)
+    f_votes = len(dispute['votes']) - t_votes
+
+    t_bets_sum = sum(b["sum"] for b in dispute['bets'] if b["on"]=='T')
+    f_bets_sum = sum(b["sum"] for b in dispute['bets'] if b["on"]=='F')
+
+    msg=f"Спор {dispute["name"]} завершен!\nРезультаты:\n"
+
+    # TODO обработка нулевых ставок
+    if t_bets_sum == 0 or f_bets_sum == 0:
+        await bot.send_message(chat_id, "можно пока без нулевых ставок пж")
+        return
+
+    for i in range(len(dispute['bets'])):
+        b = dispute['bets'][i]
+        dispute['bets'][i].result = (t_votes/(t_votes + f_votes) if b["on"]=='T' else f_votes/(t_votes + f_votes)) *\
+        (b["sum"] + (b["sum"]/(t_bets_sum if b["on"]=='T' else f_bets_sum)) *\
+        (f_bets_sum if b["on"]=='T' else t_bets_sum))
+        # TODO добавить вывод ника вместо id
+        msg += f"👤 {b["uid"]} получает {dispute['bets'][i]["result"]} \n"
+        # TODO добавить переводы тон коинов для реальных ставок
+
+    await bot.send_message(chat_id, msg)
+    del disputes[key]
+
+
+@dp.message(Command('create_dispute'))
+async def create_disput(message: types.Message):
+    try:
+        # Разбиваем аргументы с учетом кавычек
+        args = shlex.split(message.text)[1:] 
+    except ValueError as e:
+        await message.reply(f"Ошибка в формате аргументов: {e}")
+        return
     
-    # Формирование результата
-    result_text = f"Результат спора '{dispute_name}': {result}\nВыплаты:\n"
-    for user, amount in payouts.items():
-        result_text += f"@{user}: {amount}\n"
+    if len(args) < 4:
+        await message.reply("Используйте: /create_disput [имя] [описание] [конец_ставок] [конец_спора]")
+        return
+
+    name, desc = args[0], ' '.join(args[1:-2])
+    try:
+        end_bet = datetime.strptime(args[-2], '%Y-%m-%d %H:%M')
+        end_disp = datetime.strptime(args[-1], '%Y-%m-%d %H:%M')
+    except ValueError:
+        await message.reply("Формат даты: ГГГГ-ММ-ДД ЧЧ:ММ")
+        return
+
+    if end_bet >= end_disp:
+        await message.reply("Конец ставок должен быть раньше конца спора.")
+        return
     
-    await bot.send_message(chat_id, result_text)
+    if end_bet <= datetime.now() or end_disp <= datetime.now():
+        await message.reply("Конец ставок должен быть позже текущего момента.")
+        return
+
+    chat_id = message.chat.id
+    key = (chat_id, name)
+    if key in disputes:
+        await message.reply("Спор уже существует.")
+        return
+
+    disputes[key] = {
+        'name': name,
+        'description': desc,
+        'end_bet_time': end_bet,
+        'end_dispute_time': end_disp,
+        'bets': [], # {on: (T/F), uid, sum, result}
+        'votes': {},
+        'chat_id': chat_id,
+    }
+
+    # TODO добавить предупреждение об окончании приема ставок и о конце спора за n минут
+    scheduler.add_job(
+        resolve_dispute, 
+        'date',
+        run_date=end_disp,
+        args=[chat_id, name],
+        misfire_grace_time=60,  # Разрешить опоздание до 60 сек
+        coalesce=True,          # Объединить пропущенные задачи в одну
+        id=f"resolve_{chat_id}_{name}")
     
-    # Очистка данных
-    del active_disputes[dispute_name]
-    del bets[dispute_name]
-    del dispute_votes[dispute_name]
+    await message.reply(f"Спор '{name}' создан.\nСтавки до {end_bet.strftime('%Y-%m-%d %H:%M')}.\nОкончание спора: {end_disp.strftime('%Y-%m-%d %H:%M')}\n\nОписание:\n{desc}")
+
+@dp.message(Command('bet'))
+async def bet(message: types.Message):
+    try:
+        # Разбиваем аргументы с учетом кавычек
+        args = shlex.split(message.text)[1:] 
+    except ValueError as e:
+        await message.reply(f"Ошибка в формате аргументов: {e}")
+        return
+    
+    if len(args) != 3:
+        await message.reply("Используйте: /bet [имя] [T/F] [сумма]")
+        return
+
+    name, var, sum_str = args
+    if var not in ('T', 'F'):
+        await message.reply("Вариант: T или F.")
+        return
+
+    try:
+        bet_sum = float(sum_str)
+        if bet_sum <= 0:
+            raise ValueError
+    except ValueError:
+        await message.reply("Сумма должна быть числом > 0.")
+        return
+
+    key = (message.chat.id, name)
+    if key not in disputes:
+        await message.reply("Спор не найден.")
+        return
+
+    dispute = disputes[key]
+    if datetime.now() > dispute['end_bet_time']:
+        await message.reply("Время ставок истекло.")
+        return
+
+
+    uid = message.from_user.id
+    existing_bet = next((b for b in dispute['bets'] if b['uid'] == uid and b['on'] == var), None)
+    
+    if existing_bet:
+        existing_bet['sum'] += bet_sum
+        existing_bet['result'] += bet_sum
+    else:
+        dispute['bets'].append({
+            'uid': uid,
+            'on': var,
+            'sum': bet_sum,
+            'result': bet_sum
+        })
+
+    # TODO добавить переводы тон коинов для реальных ставок
+    
+    msg = "Ставка принята.\nТекущие ставки:\n"
+    for b in dispute['bets']:
+        # TODO добавить вывод ника вместо id
+        msg += f"👤 {b["uid"]} ставит {b["sum"]} на {"успех" if b["on"] == 'T' else "неудачу"}\n"
+
+    await message.reply(msg)
+
+
+@dp.message(Command('vote'))
+async def vote(message: types.Message):
+    try:
+        # Разбиваем аргументы с учетом кавычек
+        args = shlex.split(message.text)[1:] 
+    except ValueError as e:
+        await message.reply(f"Ошибка в формате аргументов: {e}")
+        return
+    
+    if len(args) != 2:
+        await message.reply("Используйте: /vote [имя] [T/F]")
+        return
+
+    name, var = args
+    if var not in ('T', 'F'):
+        await message.reply("Вариант: T или F.")
+        return
+
+    key = (message.chat.id, name)
+    if key not in disputes:
+        await message.reply("Спор не найден.")
+        return
+
+    dispute = disputes[key]
+    now = datetime.now()
+    if now < dispute['end_bet_time'] or now > dispute['end_dispute_time']:
+        await message.reply("Голосование невозможно.")
+        return
+
+    uid = message.from_user.id
+
+    user_has_bet = any(b['uid'] == uid for b in dispute['bets'])
+    if user_has_bet:
+        await message.reply("Ставившие не голосуют.")
+        return
+
+    dispute['votes'][uid] = (var == 'T')
+    await message.reply("Голос учтён.")
+
+
 
 async def main():
+    scheduler.start()
     await dp.start_polling(bot)
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     asyncio.run(main())
